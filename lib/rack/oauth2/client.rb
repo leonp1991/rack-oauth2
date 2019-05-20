@@ -1,13 +1,14 @@
 module Rack
   module OAuth2
     class Client
-      include AttrRequired, AttrOptional
+      include AttrOptional
+      include AttrRequired
       attr_required :identifier
       attr_optional :secret, :private_key, :certificate, :redirect_uri, :scheme, :host, :port, :authorization_endpoint, :token_endpoint
 
       def initialize(attributes = {})
         (required_attributes + optional_attributes).each do |key|
-          self.send :"#{key}=", attributes[key]
+          send :"#{key}=", attributes[key]
         end
         @grant = Grant::ClientCredentials.new
         @authorization_endpoint ||= '/oauth2/authorize'
@@ -20,15 +21,15 @@ module Rack
         params[:response_type] = Array(params[:response_type]).join(' ')
         params[:scope] = Array(params[:scope]).join(' ')
         Util.redirect_uri absolute_uri_for(authorization_endpoint), :query, params.merge(
-          client_id: self.identifier,
-          redirect_uri: self.redirect_uri
+          client_id: identifier,
+          redirect_uri: redirect_uri
         )
       end
 
       def authorization_code=(code)
         @grant = Grant::AuthorizationCode.new(
           code: code,
-          redirect_uri: self.redirect_uri
+          redirect_uri: redirect_uri
         )
       end
 
@@ -69,7 +70,8 @@ module Rack
       end
 
       def access_token!(*args)
-        headers, params = {}, @grant.as_json
+        headers = {}
+        params  = @grant.as_json
         http_client = Rack::OAuth2.http_client
 
         # NOTE:
@@ -81,16 +83,17 @@ module Rack
         params[:scope] = Array(options.delete(:scope)).join(' ') if options[:scope].present?
         params.merge! options
 
+        if options[:use_mtls]
+          http_client.ssl_config.client_key  = private_key
+          http_client.ssl_config.client_cert = certificate
+        end
+
         case client_auth_method
         when :basic
           cred = ["#{identifier}:#{secret}"].pack('m').tr("\n", '')
-          headers.merge!(
-            'Authorization' => "Basic #{cred}"
-          )
+          headers['Authorization'] = "Basic #{cred}"
         when :jwt_bearer
-          params.merge!(
-            client_assertion_type: URN::ClientAssertionType::JWT_BEARER
-          )
+          params[:client_assertion_type] = URN::ClientAssertionType::JWT_BEARER
           # NOTE: optionally auto-generate client_assertion.
           if params[:client_assertion].blank?
             require 'json/jwt'
@@ -104,20 +107,16 @@ module Rack
             ).sign(private_key || secret).to_s
           end
         when :saml2_bearer
-          params.merge!(
-            client_assertion_type: URN::ClientAssertionType::SAML2_BEARER
-          )
+          params[:client_assertion_type] = URN::ClientAssertionType::SAML2_BEARER
         when :mtls
-          params.merge!(
-            client_id: identifier
-          )
+          warn '[DEPRECATION] client_auth_method: :mtls is deprecated. Please use use_mtls: true'
+
+          params[:client_id] = identifier
           http_client.ssl_config.client_key = private_key
           http_client.ssl_config.client_cert = certificate
         else
-          params.merge!(
-            client_id: identifier,
-            client_secret: secret
-          )
+          params[:client_id]     = identifier
+          params[:client_secret] = secret
         end
         handle_response do
           http_client.post(
@@ -132,10 +131,11 @@ module Rack
 
       def absolute_uri_for(endpoint)
         _endpoint_ = Util.parse_uri endpoint
-        _endpoint_.scheme ||= self.scheme || 'https'
-        _endpoint_.host ||= self.host
-        _endpoint_.port ||= self.port
+        _endpoint_.scheme ||= scheme || 'https'
+        _endpoint_.host ||= host
+        _endpoint_.port ||= port
         raise 'No Host Info' unless _endpoint_.host
+
         _endpoint_.to_s
       end
 
